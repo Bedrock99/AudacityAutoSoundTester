@@ -2,5 +2,7 @@
   "audio_dir": ".",
   "audacity_path": "C:\\Program Files\\Audacity\\audacity.exe",
   "volume_step_db": 1.5,
-  "target_peak_db": -1.0
+  "target_peak_db": -1.0,
+  "skip_normalized": false,
+  "skip_tolerance_db": 0.1
 }

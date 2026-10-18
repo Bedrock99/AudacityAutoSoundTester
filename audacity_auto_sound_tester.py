@@ -84,6 +84,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "audacity_path": r"C:\Program Files\Audacity\audacity.exe",
     "volume_step_db": 1.5,
     "target_peak_db": -1.0,
+    "skip_normalized": False,
+    "skip_tolerance_db": 0.1,
 }
 
 
@@ -117,12 +119,16 @@ class SoundTester:
         audacity_path: Path,
         volume_step_db: float = 1.5,
         target_peak_db: float = -1.0,
+        skip_normalized: bool = False,
+        skip_tolerance_db: float = 0.1,
         reset: bool = False,
     ):
         self.base_dir = base_dir.resolve()
         self.audacity_path = audacity_path.resolve()
         self.volume_step_db = volume_step_db
         self.target_peak_db = target_peak_db
+        self.skip_normalized = skip_normalized
+        self.skip_tolerance_db = skip_tolerance_db
         self.reset = reset
         self.session_file = self.base_dir / SESSION_FILENAME
         self.completed_files: Set[str] = set()
@@ -443,6 +449,10 @@ class SoundTester:
         print(f" Audacity:        {self.audacity_path}")
         print(f" Pegel-Schritt:   ±{self.volume_step_db} dB")
         print(f" Ziel-Peak:       {self.target_peak_db} dBFS")
+        if self.skip_normalized:
+            print(f" Skip-Normalisiert: Aktiv (±{self.skip_tolerance_db} dB um {self.target_peak_db} dBFS)")
+        else:
+            print(f" Skip-Normalisiert: Deaktiviert")
         print(f" Session-Datei:   {self.session_file.name}")
         print("-" * 64)
 
@@ -469,6 +479,18 @@ class SoundTester:
                     continue
 
                 peak = self.get_peak_dbfs(file_path)
+
+                # Prüfen, ob die Datei bereits im Normalisierungsbereich liegt (+/- 0.1 dB)
+                if self.skip_normalized and peak is not None and peak != float("-inf"):
+                    if abs(peak - self.target_peak_db) <= self.skip_tolerance_db + 1e-6:
+                        print(
+                            f"⏭️  [{index}/{total_files}] {rel_path}  (Peak: {self.format_peak(peak)}) "
+                            f"-> Bereits normalisiert (±{self.skip_tolerance_db} dB), übersprungen."
+                        )
+                        self.completed_files.add(rel_path)
+                        self.save_session()
+                        continue
+
                 print(f"[{index}/{total_files}] {rel_path}  (Peak: {self.format_peak(peak)})")
                 self.play_audio(file_path)
 
@@ -557,6 +579,18 @@ def parse_arguments() -> argparse.Namespace:
         help="Ziel-Peak in dBFS für Normalisierung (n) (überschreibt config.json).",
     )
     parser.add_argument(
+        "--skip-normalized",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Überspringt Dateien, deren Peak bereits innerhalb der Toleranz (+/- 0.1 dB) des Ziel-Peaks liegt.",
+    )
+    parser.add_argument(
+        "--skip-tolerance",
+        type=float,
+        default=None,
+        help="Toleranz in dB für --skip-normalized (Standard: 0.1, überschreibt config.json).",
+    )
+    parser.add_argument(
         "--reset",
         action="store_true",
         help="Verwirft die gespeicherte Session und startet von vorn.",
@@ -585,12 +619,24 @@ def main() -> None:
         if args.target_peak_db is not None
         else float(config.get("target_peak_db", -1.0))
     )
+    skip_normalized = (
+        args.skip_normalized
+        if args.skip_normalized is not None
+        else bool(config.get("skip_normalized", False))
+    )
+    skip_tolerance_db = (
+        args.skip_tolerance
+        if args.skip_tolerance is not None
+        else float(config.get("skip_tolerance_db", 0.1))
+    )
 
     tester = SoundTester(
         base_dir=base_dir,
         audacity_path=audacity_path,
         volume_step_db=volume_step_db,
         target_peak_db=target_peak_db,
+        skip_normalized=skip_normalized,
+        skip_tolerance_db=skip_tolerance_db,
         reset=args.reset,
     )
     tester.run()

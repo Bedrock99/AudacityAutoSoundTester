@@ -87,6 +87,12 @@ python audacity_auto_sound_tester.py
 # Anderes Verzeichnis prüfen:
 python audacity_auto_sound_tester.py --dir "D:\AudioSammlung\SFX"
 
+# Bereits normalisierte Dateien überspringen (+/- 0.1 dB um Normalwert):
+python audacity_auto_sound_tester.py --skip-normalized
+
+# Eigene Toleranz angeben (z. B. +/- 0.2 dB):
+python audacity_auto_sound_tester.py --skip-normalized --skip-tolerance 0.2
+
 # Andere Schrittweite (z. B. 2.0 dB) und Ziel-Peak (-0.5 dBFS):
 python audacity_auto_sound_tester.py --step-db 2.0 --target-peak-db -0.5
 
@@ -105,6 +111,8 @@ python audacity_auto_sound_tester.py --reset
 | `--audacity` | `-a` | Wert aus `config.json` | Pfad zur `audacity.exe` |
 | `--step-db` | | Wert aus `config.json` | dB-Schrittweite für lauter/leiser (`+` / `-`) |
 | `--target-peak-db` | | Wert aus `config.json` | Ziel-Peak in dBFS für Normalisierung (`n`) |
+| `--skip-normalized` / `--no-skip-normalized` | | Wert aus `config.json` (`false`) | Überspringt Dateien, deren Peak bereits innerhalb der Toleranz des Ziel-Peaks liegt |
+| `--skip-tolerance` | | Wert aus `config.json` (`0.1`) | Toleranz in dB für `--skip-normalized` (Standard: `±0.1 dB`) |
 | `--reset` | | `False` | Verwirft die gespeicherte Session und startet von vorn |
 
 ---

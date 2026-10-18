@@ -193,6 +193,8 @@ class TestAudacityAutoSoundTester(unittest.TestCase):
             self.assertIsNone(args.audacity)
             self.assertIsNone(args.step_db)
             self.assertIsNone(args.target_peak_db)
+            self.assertIsNone(args.skip_normalized)
+            self.assertIsNone(args.skip_tolerance)
             self.assertFalse(args.reset)
 
         custom_args = [
@@ -201,6 +203,8 @@ class TestAudacityAutoSoundTester(unittest.TestCase):
             "--audacity", r"D:\Tools\audacity.exe",
             "--step-db", "2.0",
             "--target-peak-db", "-0.5",
+            "--skip-normalized",
+            "--skip-tolerance", "0.2",
             "--reset"
         ]
         with patch("sys.argv", custom_args):
@@ -209,7 +213,39 @@ class TestAudacityAutoSoundTester(unittest.TestCase):
             self.assertEqual(args.audacity, Path(r"D:\Tools\audacity.exe"))
             self.assertEqual(args.step_db, 2.0)
             self.assertEqual(args.target_peak_db, -0.5)
+            self.assertTrue(args.skip_normalized)
+            self.assertEqual(args.skip_tolerance, 0.2)
             self.assertTrue(args.reset)
+
+    def test_skip_normalized(self):
+        # Create normalized track (target -1.0 dBFS, max 32767 * 10^(-1/20) = ~29205)
+        t_norm = self.test_dir / "already_normalized.wav"
+        create_test_wav(t_norm, amplitude=29200)
+
+        # Create quiet track (amplitude 5000 -> approx -16 dBFS)
+        t_quiet = self.test_dir / "quiet.wav"
+        create_test_wav(t_quiet, amplitude=5000)
+
+        tester = SoundTester(
+            base_dir=self.test_dir,
+            audacity_path=DEFAULT_AUDACITY_PATH,
+            target_peak_db=-1.0,
+            skip_normalized=True,
+            skip_tolerance_db=0.1,
+        )
+        tester.init_audio = MagicMock()
+        tester.play_audio = MagicMock()
+        tester.stop_audio = MagicMock()
+        tester.cleanup_audio = MagicMock()
+
+        # Only the quiet track should prompt the user; already_normalized must be skipped!
+        user_actions = iter(["next"])
+        tester.prompt_user_action = lambda: next(user_actions)
+
+        tester.run()
+
+        # Both tracks should now be completed (one via skip, one via next)
+        self.assertEqual(tester.completed_files, {"already_normalized.wav", "quiet.wav"})
 
     def test_full_run_with_simulated_inputs(self):
         t1 = self.test_dir / "track1.wav"
