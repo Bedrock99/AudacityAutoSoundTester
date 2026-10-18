@@ -267,6 +267,26 @@ class SoundTester:
                     pass
             raise
 
+    def get_peak_dbfs(self, file_path: Path) -> Optional[float]:
+        """Berechnet den Spitzenpegel (Peak) einer Audiodatei in dBFS."""
+        if AudioSegment is None:
+            return None
+        try:
+            sound = AudioSegment.from_file(str(file_path))
+            return sound.max_dBFS
+        except Exception:
+            return None
+
+    def format_peak(self, peak: Optional[float]) -> str:
+        """Formatiert einen Peak-Wert lesbar für das Terminal."""
+        if peak is None:
+            return "n/a"
+        if peak == float("-inf"):
+            return "-inf (Stille)"
+        if peak >= -0.05:
+            return f"{peak:.1f} dBFS ⚠️ CLIPPING"
+        return f"{peak:.1f} dBFS"
+
     def adjust_volume(self, file_path: Path, delta_db: float) -> bool:
         """Passt die Lautstärke um delta_db an, überschreibt die Datei und spielt sie erneut ab."""
         if AudioSegment is None:
@@ -281,8 +301,7 @@ class SoundTester:
 
             direction = f"+{delta_db:.1f} dB" if delta_db > 0 else f"{delta_db:.1f} dB"
             new_peak = new_sound.max_dBFS
-            peak_str = f"{new_peak:.1f} dBFS" if new_peak != float("-inf") else "-inf"
-            print(f"  🔊 Lautstärke um {direction} angepasst (Neuer Peak: {peak_str})")
+            print(f"  🔊 Lautstärke um {direction} angepasst (Neuer Peak: {self.format_peak(new_peak)})")
             self.play_audio(file_path)
             return True
         except Exception as e:
@@ -310,7 +329,7 @@ class SoundTester:
             self.export_audio(new_sound, file_path)
 
             direction = f"+{delta_db:.1f} dB" if delta_db > 0 else f"{delta_db:.1f} dB"
-            print(f"  🎯 Normalisiert auf {target_peak_db:.1f} dBFS (Änderung: {direction}, alter Peak: {current_peak:.1f} dBFS)")
+            print(f"  🎯 Normalisiert auf {target_peak_db:.1f} dBFS (Änderung: {direction}, alter Peak: {self.format_peak(current_peak)})")
             self.play_audio(file_path)
             return True
         except Exception as e:
@@ -406,7 +425,8 @@ class SoundTester:
             print(f"  ❌ Fehler beim Starten von Audacity: {e}\n")
             return False
 
-        print("  ✅ Audacity geschlossen. Spiele Datei zur Kontrolle erneut ab...\n")
+        cur_peak = self.get_peak_dbfs(file_path)
+        print(f"  ✅ Audacity geschlossen. Spiele Datei zur Kontrolle erneut ab... (Peak: {self.format_peak(cur_peak)})\n")
         self.play_audio(file_path)
         return True
 
@@ -448,7 +468,8 @@ class SoundTester:
                 if rel_path in self.completed_files:
                     continue
 
-                print(f"[{index}/{total_files}] {rel_path}")
+                peak = self.get_peak_dbfs(file_path)
+                print(f"[{index}/{total_files}] {rel_path}  (Peak: {self.format_peak(peak)})")
                 self.play_audio(file_path)
 
                 while True:
@@ -462,7 +483,8 @@ class SoundTester:
                         break
 
                     elif action == "replay":
-                        print("  ▶️  Replay...")
+                        cur_peak = self.get_peak_dbfs(file_path)
+                        print(f"  ▶️  Replay... (Peak: {self.format_peak(cur_peak)})")
                         self.play_audio(file_path)
 
                     elif action == "volume_up":
