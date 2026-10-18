@@ -1,0 +1,6 @@
+{
+  "audio_dir": ".",
+  "audacity_path": "C:\\Program Files\\Audacity\\audacity.exe",
+  "volume_step_db": 1.5,
+  "target_peak_db": -1.0
+}

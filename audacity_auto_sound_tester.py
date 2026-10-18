@@ -3,17 +3,19 @@
 AudacityAutoSoundTester
 =======================
 Ein interaktives Python-CLI-Tool zur manuellen Qualitätskontrolle
-und Lautstärkeanpassung einer Audiosammlung mit direkter Audacity-Anbindung.
+und Lautstärkeanpassung einer Audiosammlung mit direkter
+Pegelbearbeitung (+ / - / n) und Audacity-Anbindung.
 """
 
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Set, List
+from typing import Optional, Set, List, Dict, Any
 
 # Unterdrücke pygame Begrüßungstext im Terminal
 os.environ["PYGAME_HIDE_SUPPORT_PROMPT"] = "1"
@@ -30,14 +32,82 @@ if sys.stderr and hasattr(sys.stderr, "reconfigure"):
     except Exception:
         pass
 
+
+def ensure_ffmpeg_in_path() -> None:
+    """Stellt sicher, dass FFmpeg im Suchpfad auffindbar ist (auch unter Windows nach WinGet-Installation)."""
+    if shutil.which("ffmpeg") is not None:
+        return
+
+    # Windows Registry User-Environment PATH prüfen
+    if sys.platform == "win32":
+        try:
+            import winreg
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Environment") as key:
+                user_path, _ = winreg.QueryValueEx(key, "Path")
+                for item in user_path.split(";"):
+                    item = item.strip()
+                    if item and item not in os.environ.get("PATH", ""):
+                        os.environ["PATH"] = item + ";" + os.environ.get("PATH", "")
+        except Exception:
+            pass
+
+    # WinGet / LocalAppData Pakete durchsuchen
+    if shutil.which("ffmpeg") is None:
+        local_appdata = os.environ.get("LOCALAPPDATA", "")
+        if local_appdata:
+            candidate = Path(local_appdata) / "Microsoft" / "WinGet" / "Packages"
+            if candidate.is_dir():
+                for exe in candidate.glob("**/ffmpeg.exe"):
+                    os.environ["PATH"] = str(exe.parent) + ";" + os.environ.get("PATH", "")
+                    break
+
+
+ensure_ffmpeg_in_path()
+
 try:
     import pygame
 except ImportError:
     pygame = None
 
+try:
+    from pydub import AudioSegment
+except ImportError:
+    AudioSegment = None
+
 SESSION_FILENAME = ".audacity_auto_sound_tester_session.json"
+CONFIG_FILENAME = "config.json"
 SUPPORTED_EXTENSIONS = {".mp3", ".wav", ".ogg", ".flac", ".m4a"}
 DEFAULT_AUDACITY_PATH = Path(r"C:\Program Files\Audacity\audacity.exe")
+
+DEFAULT_CONFIG: Dict[str, Any] = {
+    "audio_dir": ".",
+    "audacity_path": r"C:\Program Files\Audacity\audacity.exe",
+    "volume_step_db": 1.5,
+    "target_peak_db": -1.0,
+}
+
+
+def load_or_create_config(config_path: Path) -> Dict[str, Any]:
+    """Lädt die Konfiguration aus einer JSON-Datei oder legt sie mit Standardwerten an."""
+    config = dict(DEFAULT_CONFIG)
+    if config_path.exists():
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    config.update(data)
+        except Exception as e:
+            print(f"⚠️  Konfigurationsdatei '{config_path}' konnte nicht gelesen werden ({e}). Verwende Standardwerte.")
+    else:
+        # Standardkonfiguration erstellen
+        try:
+            with open(config_path, "w", encoding="utf-8") as f:
+                json.dump(config, f, indent=2, ensure_ascii=False)
+            print(f"📄 Neue Konfigurationsdatei erstellt: {config_path.name}")
+        except Exception as e:
+            print(f"⚠️  Konnte Standard-Konfiguration nicht schreiben: {e}")
+
+    return config
 
 
 class SoundTester:
@@ -45,10 +115,14 @@ class SoundTester:
         self,
         base_dir: Path,
         audacity_path: Path,
+        volume_step_db: float = 1.5,
+        target_peak_db: float = -1.0,
         reset: bool = False,
     ):
         self.base_dir = base_dir.resolve()
         self.audacity_path = audacity_path.resolve()
+        self.volume_step_db = volume_step_db
+        self.target_peak_db = target_peak_db
         self.reset = reset
         self.session_file = self.base_dir / SESSION_FILENAME
         self.completed_files: Set[str] = set()
@@ -111,7 +185,6 @@ class SoundTester:
         """Durchsucht das Stammverzeichnis rekursiv nach Audiodateien und sortiert sie alphabetisch."""
         audio_files: List[Path] = []
         for root, dirs, files in os.walk(self.base_dir, followlinks=False):
-            # Ignoriere versteckte Ordner (z.B. .git)
             dirs[:] = [d for d in dirs if not d.startswith(".")]
             for file_name in files:
                 if file_name.startswith("."):
@@ -120,7 +193,6 @@ class SoundTester:
                 if ext in SUPPORTED_EXTENSIONS:
                     audio_files.append(Path(root) / file_name)
 
-        # Alphabetisch nach relativem Pfad sortieren
         audio_files.sort(key=lambda p: p.relative_to(self.base_dir).as_posix().lower())
         return audio_files
 
@@ -150,7 +222,6 @@ class SoundTester:
 
     def save_session(self) -> None:
         """Speichert den aktuellen Fortschritt atomar in der Session-Datei."""
-        # Sortierte Liste für reproduzierbare JSON-Dateien
         sorted_completed = sorted(list(self.completed_files))
         session_data = {
             "version": 1,
@@ -169,13 +240,91 @@ class SoundTester:
         except Exception as e:
             print(f"\n⚠️  Fehler beim Speichern der Session-Datei: {e}")
 
+    def export_audio(self, sound: Any, target_path: Path) -> None:
+        """Exportiert ein AudioSegment atomar in das Zielformat."""
+        ext = target_path.suffix.lower()
+        temp_path = target_path.with_name(f"{target_path.stem}.tmp_edit{target_path.suffix}")
+        try:
+            if ext == ".mp3":
+                sound.export(str(temp_path), format="mp3", bitrate="320k")
+            elif ext == ".wav":
+                sound.export(str(temp_path), format="wav")
+            elif ext == ".flac":
+                sound.export(str(temp_path), format="flac")
+            elif ext == ".ogg":
+                sound.export(str(temp_path), format="ogg", bitrate="320k")
+            elif ext == ".m4a":
+                sound.export(str(temp_path), format="ipod", bitrate="256k")
+            else:
+                sound.export(str(temp_path), format=ext.lstrip("."))
+
+            temp_path.replace(target_path)
+        except Exception:
+            if temp_path.exists():
+                try:
+                    temp_path.unlink()
+                except Exception:
+                    pass
+            raise
+
+    def adjust_volume(self, file_path: Path, delta_db: float) -> bool:
+        """Passt die Lautstärke um delta_db an, überschreibt die Datei und spielt sie erneut ab."""
+        if AudioSegment is None:
+            print("  ❌ 'pydub' ist nicht installiert. Lautstärkeanpassung nicht verfügbar.")
+            return False
+
+        self.stop_audio()
+        try:
+            sound = AudioSegment.from_file(str(file_path))
+            new_sound = sound.apply_gain(delta_db)
+            self.export_audio(new_sound, file_path)
+
+            direction = f"+{delta_db:.1f} dB" if delta_db > 0 else f"{delta_db:.1f} dB"
+            new_peak = new_sound.max_dBFS
+            peak_str = f"{new_peak:.1f} dBFS" if new_peak != float("-inf") else "-inf"
+            print(f"  🔊 Lautstärke um {direction} angepasst (Neuer Peak: {peak_str})")
+            self.play_audio(file_path)
+            return True
+        except Exception as e:
+            print(f"  ❌ Fehler bei der Lautstärkeanpassung: {e}")
+            self.play_audio(file_path)
+            return False
+
+    def normalize_audio(self, file_path: Path, target_peak_db: float) -> bool:
+        """Normalisiert die Audiodatei auf target_peak_db, überschreibt die Datei und spielt sie erneut ab."""
+        if AudioSegment is None:
+            print("  ❌ 'pydub' ist nicht installiert. Normalisierung nicht verfügbar.")
+            return False
+
+        self.stop_audio()
+        try:
+            sound = AudioSegment.from_file(str(file_path))
+            current_peak = sound.max_dBFS
+            if current_peak == float("-inf"):
+                print("  ⚠️  Datei enthält nur Stille, keine Normalisierung möglich.")
+                self.play_audio(file_path)
+                return False
+
+            delta_db = target_peak_db - current_peak
+            new_sound = sound.apply_gain(delta_db)
+            self.export_audio(new_sound, file_path)
+
+            direction = f"+{delta_db:.1f} dB" if delta_db > 0 else f"{delta_db:.1f} dB"
+            print(f"  🎯 Normalisiert auf {target_peak_db:.1f} dBFS (Änderung: {direction}, alter Peak: {current_peak:.1f} dBFS)")
+            self.play_audio(file_path)
+            return True
+        except Exception as e:
+            print(f"  ❌ Fehler beim Normalisieren: {e}")
+            self.play_audio(file_path)
+            return False
+
     def prompt_user_action(self) -> str:
-        """
-        Liest die Benutzeraktion ein.
-        Unterstützt direkte Tastendrücke (msvcrt unter Windows)
-        sowie Standard-input()-Fallback für Terminals ohne TTY oder andere Plattformen.
-        """
-        prompt_text = "  Aktion: [Enter/Space] Passt (Weiter) | [r] Replay | [e] Audacity | [q] Beenden\n  Auswahl: "
+        """Liest die Benutzeraktion ein (Tastendruck unter Windows, Input-Fallback)."""
+        prompt_text = (
+            f"  Aktion: [Enter/Space] Passt | [r] Replay | [+] Lauter (+{self.volume_step_db}dB) | "
+            f"[-] Leiser (-{self.volume_step_db}dB) | [n] Normalisieren ({self.target_peak_db}dBFS) | "
+            f"[e] Audacity | [q] Beenden\n  Auswahl: "
+        )
         sys.stdout.write(prompt_text)
         sys.stdout.flush()
 
@@ -183,22 +332,28 @@ class SoundTester:
             import msvcrt
             while True:
                 char = msvcrt.getwch()
-                # Sonder- / Funktionstasten abfangen (bestehen aus 2 Codes)
                 if char in ("\x00", "\xe0"):
                     msvcrt.getwch()
                     continue
-                # Ctrl+C
                 if char == "\x03":
                     print("^C")
                     raise KeyboardInterrupt
 
-                # Enter (\r, \n) oder Leerzeichen -> Weiter
                 if char in ("\r", "\n", " "):
                     print("[Weiter]")
                     return "next"
+                elif char in ("+", "="):
+                    print("[+] Lauter")
+                    return "volume_up"
+                elif char == "-":
+                    print("[-] Leiser")
+                    return "volume_down"
 
                 c_lower = char.lower()
-                if c_lower == "r":
+                if c_lower == "n":
+                    print("[n - Normalisieren]")
+                    return "normalize"
+                elif c_lower == "r":
                     print("[r - Replay]")
                     return "replay"
                 elif c_lower == "e":
@@ -208,41 +363,40 @@ class SoundTester:
                     print("[q - Beenden]")
                     return "quit"
 
-                # Ungültige Taste
                 sys.stdout.write(f"\r  [Ungültig: '{char}'] " + prompt_text)
                 sys.stdout.flush()
         else:
-            # Fallback für nicht-interaktive Umgebungen / Linux / Tests
             while True:
                 line = sys.stdin.readline()
-                if not line:  # EOF
+                if not line:
                     return "quit"
                 line = line.strip().lower()
                 if line in ("", " ", "next"):
                     return "next"
+                if line in ("+", "plus", "louder", "lauter"):
+                    return "volume_up"
+                if line in ("-", "minus", "quieter", "leiser"):
+                    return "volume_down"
+                if line in ("n", "norm", "normalize", "normalisieren"):
+                    return "normalize"
                 if line in ("r", "replay"):
                     return "replay"
                 if line in ("e", "edit"):
                     return "edit"
                 if line in ("q", "quit", "exit"):
                     return "quit"
-                sys.stdout.write("  Ungültige Eingabe. Bitte Enter/Space, r, e oder q wählen:\n  Auswahl: ")
+                sys.stdout.write("  Ungültige Eingabe. Bitte Enter/Space, r, +, -, n, e oder q wählen:\n  Auswahl: ")
                 sys.stdout.flush()
 
     def open_in_audacity(self, file_path: Path) -> bool:
-        """
-        Öffnet die Datei in Audacity, blockiert bis Audacity geschlossen wird,
-        und spielt die bearbeitete Datei anschließend zur Kontrolle ab.
-        """
+        """Öffnet die Datei in Audacity, blockiert bis Audacity geschlossen wird, und spielt sie zur Kontrolle ab."""
         if not self.audacity_path.is_file():
             print(f"\n  ❌ Audacity-Executable nicht gefunden unter:")
             print(f"     {self.audacity_path}")
-            print(f"     Bitte gib den korrekten Pfad via '--audacity \"PFAD\"' an.\n")
+            print(f"     Bitte gib den korrekten Pfad via '--audacity \"PFAD\"' oder in config.json an.\n")
             return False
 
-        # Wichtig: Vor dem Starten von Audacity Datei-Locks von pygame lösen
         self.stop_audio()
-
         print(f"\n  🚀 Öffne in Audacity: {file_path.name}")
         print("  ⏳ Skript wartet, bis Audacity geschlossen wird...")
 
@@ -267,6 +421,8 @@ class SoundTester:
         print("=" * 64)
         print(f" Stammverzeichnis: {self.base_dir}")
         print(f" Audacity:        {self.audacity_path}")
+        print(f" Pegel-Schritt:   ±{self.volume_step_db} dB")
+        print(f" Ziel-Peak:       {self.target_peak_db} dBFS")
         print(f" Session-Datei:   {self.session_file.name}")
         print("-" * 64)
 
@@ -289,17 +445,12 @@ class SoundTester:
             for index, file_path in enumerate(self.all_files, start=1):
                 rel_path = file_path.relative_to(self.base_dir).as_posix()
 
-                # Bereits in vorheriger Session erledigte Dateien überspringen
                 if rel_path in self.completed_files:
                     continue
 
-                # Fortschrittsanzeige: [14/120] relativer/pfad/sound.mp3
                 print(f"[{index}/{total_files}] {rel_path}")
-
-                # Autoplay starten
                 self.play_audio(file_path)
 
-                # Interaktive Schleife für die aktuelle Datei
                 while True:
                     action = self.prompt_user_action()
 
@@ -307,12 +458,21 @@ class SoundTester:
                         self.stop_audio()
                         self.completed_files.add(rel_path)
                         self.save_session()
-                        print()  # Leerzeile für Übersicht
+                        print()
                         break
 
                     elif action == "replay":
                         print("  ▶️  Replay...")
                         self.play_audio(file_path)
+
+                    elif action == "volume_up":
+                        self.adjust_volume(file_path, delta_db=+self.volume_step_db)
+
+                    elif action == "volume_down":
+                        self.adjust_volume(file_path, delta_db=-self.volume_step_db)
+
+                    elif action == "normalize":
+                        self.normalize_audio(file_path, target_peak_db=self.target_peak_db)
 
                     elif action == "edit":
                         self.open_in_audacity(file_path)
@@ -338,22 +498,41 @@ class SoundTester:
 def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="AudacityAutoSoundTester",
-        description="Manuelle Qualitätskontrolle und Lautstärkeanpassung einer Audiosammlung mit Audacity-Integration.",
+        description="Manuelle Qualitätskontrolle und Lautstärkeanpassung einer Audiosammlung mit direkter Pegel- und Audacity-Integration.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument(
+        "--config",
+        "-c",
+        type=Path,
+        default=Path(__file__).parent / CONFIG_FILENAME,
+        help="Pfad zur Konfigurationsdatei (Standard: config.json im Skriptverzeichnis).",
     )
     parser.add_argument(
         "--dir",
         "-d",
         type=Path,
-        default=Path("."),
-        help="Pfad zum Audio-Stammverzeichnis.",
+        default=None,
+        help="Pfad zum Audio-Stammverzeichnis (überschreibt config.json).",
     )
     parser.add_argument(
         "--audacity",
         "-a",
         type=Path,
-        default=DEFAULT_AUDACITY_PATH,
-        help="Pfad zur audacity.exe.",
+        default=None,
+        help="Pfad zur audacity.exe (überschreibt config.json).",
+    )
+    parser.add_argument(
+        "--step-db",
+        type=float,
+        default=None,
+        help="dB-Schrittweite für lauter/leiser (+/-) (überschreibt config.json).",
+    )
+    parser.add_argument(
+        "--target-peak-db",
+        type=float,
+        default=None,
+        help="Ziel-Peak in dBFS für Normalisierung (n) (überschreibt config.json).",
     )
     parser.add_argument(
         "--reset",
@@ -365,9 +544,31 @@ def parse_arguments() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_arguments()
+    config = load_or_create_config(args.config)
+
+    # CLI-Argumente haben Vorrang vor config.json
+    base_dir = args.dir if args.dir is not None else Path(config.get("audio_dir", "."))
+    audacity_path = (
+        args.audacity
+        if args.audacity is not None
+        else Path(config.get("audacity_path", DEFAULT_AUDACITY_PATH))
+    )
+    volume_step_db = (
+        args.step_db
+        if args.step_db is not None
+        else float(config.get("volume_step_db", 1.5))
+    )
+    target_peak_db = (
+        args.target_peak_db
+        if args.target_peak_db is not None
+        else float(config.get("target_peak_db", -1.0))
+    )
+
     tester = SoundTester(
-        base_dir=args.dir,
-        audacity_path=args.audacity,
+        base_dir=base_dir,
+        audacity_path=audacity_path,
+        volume_step_db=volume_step_db,
+        target_peak_db=target_peak_db,
         reset=args.reset,
     )
     tester.run()
