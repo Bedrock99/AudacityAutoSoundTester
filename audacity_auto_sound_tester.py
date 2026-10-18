@@ -580,8 +580,10 @@ def parse_arguments() -> argparse.Namespace:
     )
     parser.add_argument(
         "--skip-normalized",
+        "--skipnormalized",
         action=argparse.BooleanOptionalAction,
         default=None,
+        dest="skip_normalized",
         help="Überspringt Dateien, deren Peak bereits innerhalb der Toleranz (+/- 0.1 dB) des Ziel-Peaks liegt.",
     )
     parser.add_argument(
